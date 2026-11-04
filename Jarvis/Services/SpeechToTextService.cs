@@ -19,6 +19,7 @@ public class SpeechToTextService : IDisposable {
     public event Action<string>? OnSpeechRecognized;
     public event Action<string>? OnTimeout;
     public event Action? OnWakeWordDetected;
+    public event Action? OnConversationTimeout;
 
     // Константы
     private const int CHANNELS = 1;
@@ -29,8 +30,13 @@ public class SpeechToTextService : IDisposable {
 
     private readonly List<string> _wakeWordVariants = ["джарвис", "джарвис ", "джарвиз", "джарвіс"];
 
-    private enum RecognizerState { Sleeping, Listening, Processing }
+    // Paused — режим разговора: Джарвис думает или говорит, микрофон игнорируется, чтобы он не слышал сам себя.
+    private enum RecognizerState { Sleeping, Listening, Processing, Paused }
     private RecognizerState _state = RecognizerState.Sleeping;
+
+    // Режим разговора: после ответа Джарвис снова слушает без wake word
+    private volatile bool _conversationMode;
+    private int _conversationTimeoutMs = INACTIVITY_TIMEOUT_MS;
 
     // Vosk компоненты
     private Model? _model;
@@ -74,6 +80,63 @@ public class SpeechToTextService : IDisposable {
     public async Task WaitForInitializationComplete() => await _initializationTask;
 
     public void Start() => StartListening();
+
+    public bool IsInConversation => _conversationMode;
+
+    #region Режим разговора
+
+    /// <summary>Включить режим разговора: после каждого ответа Джарвис снова слушает без слова «Джарвис».</summary>
+    public void EnterConversationMode(TimeSpan silenceTimeout) {
+        lock (_audioLock) {
+            _conversationTimeoutMs = (int)silenceTimeout.TotalMilliseconds;
+            _conversationMode = true;
+            _logger.LogInformation("Режим разговора включён");
+        }
+    }
+
+    /// <summary>Выключить режим разговора и уснуть до следующего «Джарвис».</summary>
+    public void ExitConversationMode() {
+        lock (_audioLock) {
+            if (!_conversationMode) return;
+            _conversationMode = false;
+            _logger.LogInformation("Режим разговора выключен");
+            GoToSleep();
+        }
+    }
+
+    /// <summary>Снова начать слушать пользователя после ответа Джарвиса (только в режиме разговора).</summary>
+    public void ResumeListening() {
+        lock (_audioLock) {
+            if (!_conversationMode) return;
+
+            ResetCommandBuffers();
+            _state = RecognizerState.Listening;
+            OnWakeUp?.Invoke("LISTENING");
+            ResetInactivityTimer();
+            _logger.LogInformation("Разговор: слушаю пользователя");
+        }
+    }
+
+    // Фраза распознана: в обычном режиме засыпаем, в режиме разговора ждём, пока Джарвис ответит.
+    private void FinishUtterance() {
+        if (!_conversationMode) {
+            GoToSleep();
+            return;
+        }
+
+        _state = RecognizerState.Paused;
+        ResetCommandBuffers();
+        _inactivityTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+    }
+
+    private void ResetCommandBuffers() {
+        _commandRecognizer?.Reset();
+        _vadAudioBuffer?.Clear();
+        _lastSpeechEndTime = DateTime.MinValue;
+        _wasSpeechDetected = false;
+    }
+
+    #endregion
 
     #region Инициализация
 
@@ -181,6 +244,9 @@ public class SpeechToTextService : IDisposable {
             case RecognizerState.Processing:
                 ProcessCommandRecognition(buffer, bytesRecorded);
                 break;
+            case RecognizerState.Paused:
+                // Джарвис отвечает — не слушаем, чтобы не распознавать собственный голос
+                break;
         }
     }
 
@@ -217,7 +283,7 @@ public class SpeechToTextService : IDisposable {
             if (!string.IsNullOrWhiteSpace(recognizedText)) {
                 OnSpeechRecognized?.Invoke(recognizedText);
                 _logger.LogInformation($"Команда распознана: {recognizedText}");
-                GoToSleep();
+                FinishUtterance();
                 return;
             }
         }
@@ -253,6 +319,7 @@ public class SpeechToTextService : IDisposable {
             if (hasSpeech) {
                 _lastSpeechEndTime = DateTime.UtcNow;
                 _wasSpeechDetected = true;
+                if (_conversationMode) ResetInactivityTimer(); // пока пользователь говорит, не выходим из разговора
                 _logger.LogDebug("VAD: речь");
 
                 int maxBufferSize = _sampleRate * 2;
@@ -273,7 +340,10 @@ public class SpeechToTextService : IDisposable {
                     if (!string.IsNullOrWhiteSpace(finalText)) {
                         OnSpeechRecognized?.Invoke(finalText);
                         _logger.LogInformation($"Команда распознана (VAD): {finalText}");
-                        GoToSleep();
+                        FinishUtterance();
+                    }
+                    else if (_conversationMode) {
+                        ResetCommandBuffers(); // был шум, а не речь — продолжаем слушать
                     }
                     else {
                         GoToSleep();
@@ -304,20 +374,28 @@ public class SpeechToTextService : IDisposable {
 
     private void ResetInactivityTimer() {
         lock (_audioLock) {
+            int timeoutMs = _conversationMode ? _conversationTimeoutMs : INACTIVITY_TIMEOUT_MS;
             if (_inactivityTimer == null)
-                _inactivityTimer = new Timer(_ => OnInactivityTimeout(), null, INACTIVITY_TIMEOUT_MS, Timeout.Infinite);
+                _inactivityTimer = new Timer(_ => OnInactivityTimeout(), null, timeoutMs, Timeout.Infinite);
             else
-                _inactivityTimer.Change(INACTIVITY_TIMEOUT_MS, Timeout.Infinite);
+                _inactivityTimer.Change(timeoutMs, Timeout.Infinite);
         }
     }
 
     private void OnInactivityTimeout() {
+        bool conversationEnded = false;
         lock (_audioLock) {
+            // Пока Джарвис отвечает в режиме разговора, таймаут не считается
+            if (_state == RecognizerState.Paused) return;
+
             if (_state != RecognizerState.Sleeping) {
                 _logger.LogInformation("Таймаут бездействия, переход в режим сна");
+                conversationEnded = _conversationMode;
+                _conversationMode = false;
                 GoToSleep();
             }
         }
+        if (conversationEnded) OnConversationTimeout?.Invoke();
     }
 
     #endregion
