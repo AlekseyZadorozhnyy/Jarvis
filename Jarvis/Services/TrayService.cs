@@ -51,6 +51,18 @@ public class TrayService {
         });
     }
 
+    /// <summary>Показать оверлей на всё время режима разговора (без автоскрытия через 5 секунд).</summary>
+    public void ShowConversationOverlay(string tooltip) {
+        if (!_isAutoMode || _mainWindow == null) return;
+
+        ShowAsOverlay();
+        Application.Current.Dispatcher.Invoke(() => {
+            _isWaitingForCommand = false;
+            _waitCommandTimer?.Stop();
+            UpdateTrayTooltip(tooltip);
+        });
+    }
+
     public void CommandReceived() {
         if (!_isAutoMode || !_isOverlayVisible) return;
 

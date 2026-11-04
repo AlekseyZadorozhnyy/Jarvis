@@ -20,3 +20,19 @@ public class TTSSettings {
     public int TtsRate { get; set; } = 1;
     public int TtsVolume { get; set; } = 75;
 }
+
+public class ConversationSettings {
+    // Ключ Anthropic API. Лучше задать через переменную окружения ANTHROPIC_API_KEY,
+    // чтобы случайно не закоммитить его в репозиторий.
+    public string ApiKey { get; set; } = string.Empty;
+    public string ModelId { get; set; } = "claude-opus-5-5";
+    // low / medium / high — чем выше, тем глубже думает, но дольше отвечает.
+    public string Effort { get; set; } = "low";
+    public int MaxTokens { get; set; } = 2048;
+    // Сколько последних сообщений (реплик пользователя и Джарвиса) помнить в разговоре.
+    public int MaxHistoryMessages { get; set; } = 40;
+    // Сколько секунд ждать следующую фразу, прежде чем выйти из режима разговора.
+    public int SilenceTimeoutSeconds { get; set; } = 25;
+    public List<string> StartPhrases { get; set; } = ["давай поговорим", "поговори со мной", "режим разговора", "давай обсудим"];
+    public List<string> StopPhrases { get; set; } = ["хватит", "закончим разговор", "конец разговора", "выйди из режима разговора", "стоп"];
+}

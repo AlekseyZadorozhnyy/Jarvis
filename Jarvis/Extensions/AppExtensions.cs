@@ -14,6 +14,7 @@ public static class AppExtensions {
         services.Configure<AISettings>(configuration.GetSection("AISettings"));
         services.Configure<STTSettings>(configuration.GetSection("STTSettings"));
         services.Configure<TTSSettings>(configuration.GetSection("TTSSettings"));
+        services.Configure<ConversationSettings>(configuration.GetSection("ConversationSettings"));
 
         return services;
     }
@@ -24,6 +25,7 @@ public static class AppExtensions {
         services.AddSingleton<IRagMemoryService, RagMemoryService>();
         services.AddSingleton<SpeechToTextService>();
         services.AddSingleton<CommunicationAiService>();
+        services.AddSingleton<ConversationAiService>();
         services.AddSingleton<TrayService>();
         services.AddSingleton<ReminderService>();
         services.AddTransient<WeatherPlugin>();
